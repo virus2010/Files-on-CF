@@ -1,4 +1,4 @@
-// ============= 在线文本管理器（多文本 / 文件夹式管理 + Ace Editor） =============
+// ============= 在线文本管理器（多文本 / 文件夹式管理 + Ace Editor + 统一 LF） =============
 // 管理员： https://<worker域名>/<ADMIN_UUID>
 // 访   客： https://<worker域名>/sub?token=<自定义Token>&file=<文件路径>
 //
@@ -33,6 +33,13 @@ function escapeHtml(str) {
     '"': '&quot;',
     "'": '&#39;'
   }[m]));
+}
+
+// ===== 换行符标准化：统一转为 LF，避免 Windows CRLF 导致 sh 脚本报错 =====
+function normalizeLineEndings(str) {
+  return String(str ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
 }
 
 // ===== 安全 JSON 注入 =====
@@ -348,11 +355,11 @@ async function getIndex(env) {
     } catch {}
   }
 
-  // 初次使用，尝试迁移旧版 TEXT.txt
-  const legacy = await env.KV.get(TXT_FILE);
+  // 初次使用，尝试迁移旧版 TEXT.txt，并统一 LF
+  const legacy = normalizeLineEndings(await env.KV.get(TXT_FILE) || '');
   const firstPath = '默认/TEXT.txt';
 
-  await env.KV.put(fileKey(firstPath), legacy || '');
+  await env.KV.put(fileKey(firstPath), legacy);
 
   const index = sortIndex({
     folders: ['默认'],
@@ -402,22 +409,22 @@ async function handleAdminAction(request, env, url) {
       const exists = index.files.some(f => f.path === path);
       if (!exists) return bad('文件不存在', 404);
 
-      const content = await env.KV.get(fileKey(path)) || '';
+      const content = normalizeLineEndings(await env.KV.get(fileKey(path)) || '');
 
       index.selected = path;
-      await saveIndex(env, index);
+      const savedIndex = await saveIndex(env, index);
 
       return jsonResponse({
         ok: true,
         path,
         content,
-        index
+        index: savedIndex
       });
     }
 
     if (action === 'save') {
       const path = normalizePath(data.path);
-      const content = String(data.content ?? '');
+      const content = normalizeLineEndings(data.content ?? '');
 
       if (content.length > 1024 * 1024) {
         return bad('内容过大，当前限制约 1MB', 413);
@@ -547,7 +554,7 @@ async function handleAdminAction(request, env, url) {
         return bad('新文件名已存在');
       }
 
-      const content = await env.KV.get(fileKey(oldPath)) || '';
+      const content = normalizeLineEndings(await env.KV.get(fileKey(oldPath)) || '');
 
       await env.KV.put(fileKey(newPath), content);
       await env.KV.delete(fileKey(oldPath));
@@ -593,7 +600,7 @@ async function handleAdminAction(request, env, url) {
 
       for (const f of movedFiles) {
         const nextPath = newPrefix + f.path.slice(oldPrefix.length);
-        const content = await env.KV.get(fileKey(f.path)) || '';
+        const content = normalizeLineEndings(await env.KV.get(fileKey(f.path)) || '');
         await env.KV.put(fileKey(nextPath), content);
         await env.KV.delete(fileKey(f.path));
         f.path = nextPath;
@@ -736,7 +743,7 @@ export default {
       // 已登录管理页面
       const index = await getIndex(env);
       const selectedPath = index.selected || index.files[0]?.path || '';
-      const content = selectedPath ? await env.KV.get(fileKey(selectedPath)) || '' : '';
+      const content = selectedPath ? normalizeLineEndings(await env.KV.get(fileKey(selectedPath)) || '') : '';
       const nonce = createNonce();
 
       return new Response(adminPage(content, index, nonce), {
@@ -782,7 +789,7 @@ export default {
         });
       }
 
-      const data = await env.KV.get(fileKey(path)) || '';
+      const data = normalizeLineEndings(await env.KV.get(fileKey(path)) || '');
 
       return new Response(data, {
         headers: textHeaders()
@@ -1159,7 +1166,6 @@ function renderTree() {
     }
   }
 
-  // 兜底：如果某些文件的父目录不在 folders 中，也显示出来
   for (const f of files) {
     if (used.has(f.path)) continue;
 
